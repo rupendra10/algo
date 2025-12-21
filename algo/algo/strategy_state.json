@@ -1,0 +1,23 @@
+{
+    "weekly": {
+        "leg": "weekly_sell",
+        "strike": 25950.0,
+        "expiry": 0.002758299483796296,
+        "iv": 0.1542037019511902,
+        "delta": 0.4578304692405323,
+        "entry_spot": 25966.4,
+        "instrument_key": "NSE_FO|57003",
+        "entry_price": 95.0
+    },
+    "monthly": {
+        "leg": "monthly_buy",
+        "strike": 26150.0,
+        "expiry": 0.0986487104427004,
+        "iv": 0.0876445423584457,
+        "delta": 0.4965435823086669,
+        "entry_spot": 25966.4,
+        "instrument_key": "NSE_FO|58808",
+        "entry_price": 287.0
+    },
+    "last_updated": "2025-12-21 23:50:15"
+}
