@@ -1,0 +1,3 @@
+timestamp,instrument_key,side,qty,price,tag,pnl
+2025-12-21 14:41:51,NSE_FO|57004,SELL,75,60.3,WEEKLY_ENTRY,
+2025-12-21 14:41:51,NSE_FO|58808,BUY,75,287.0,MONTHLY_ENTRY,

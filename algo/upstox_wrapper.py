@@ -23,6 +23,7 @@ class UpstoxWrapper:
         self.api_client = upstox_client.ApiClient(self.configuration)
         self.history_api = upstox_client.HistoryApi(self.api_client)
         self.order_api = upstox_client.OrderApi(self.api_client)
+        self.user_api = upstox_client.UserApi(self.api_client)
         self.market_quote_api = upstox_client.MarketQuoteApi(self.api_client)
 
     def get_spot_price(self, instrument_key):
@@ -33,9 +34,19 @@ class UpstoxWrapper:
         try:
             # Full market quote
             api_response = self.market_quote_api.ltp(symbol=instrument_key, api_version='2.0')
-            # Response structure: {status: 'success', data: {'NSE_INDEX|Nifty 50': {last_price: 21500.0, ...}}}
             if api_response.status == 'success':
-                return api_response.data[instrument_key].last_price
+                # The API sometimes returns keys with : instead of | in the dictionary
+                res_key = instrument_key.replace('|', ':')
+                if instrument_key in api_response.data:
+                    return api_response.data[instrument_key].last_price
+                elif res_key in api_response.data:
+                    return api_response.data[res_key].last_price
+                
+                # Fallback: if data has items, return first one's price
+                if api_response.data:
+                    first_key = list(api_response.data.keys())[0]
+                    return api_response.data[first_key].last_price
+                    
             return None
         except ApiException as e:
             if e.status == 401:
@@ -55,11 +66,27 @@ class UpstoxWrapper:
         """
         try:
             # quotes for multiple symbols
-            # symbol argument is comma separated string
             symbols_str = ",".join(instrument_keys)
             api_response = self.market_quote_api.ltp(symbol=symbols_str, api_version='2.0')
             if api_response.status == 'success':
-                return api_response.data
+                # Normalize keys in response back to | (pipe) to match our internal keys
+                # CRITICAL: For options, the response key is often the Symbol, 
+                # but we might have requested by ID. 
+                # We should use 'instrument_token' from within the data if available.
+                normalized_data = {}
+                for key, val in api_response.data.items():
+                    # val is a MarketQuoteSymbolLtp object
+                    # It has instrument_token like 'NSE_FO|54321'
+                    token = getattr(val, 'instrument_token', None)
+                    if token:
+                        norm_token = token.replace(':', '|')
+                        normalized_data[norm_token] = val
+                    
+                    # Also keep the symbol-based key as fallback
+                    norm_key = key.replace(':', '|')
+                    normalized_data[norm_key] = val
+                    
+                return normalized_data
             return {}
         except ApiException as e:
             if e.status == 401:
@@ -96,7 +123,39 @@ class UpstoxWrapper:
         )
         try:
             api_response = self.order_api.place_order(body, api_version='2.0')
-            return api_response
+            if api_response.status == 'success':
+                return {'status': 'success', 'data': api_response.data}
+            else:
+                return {'status': 'error', 'message': getattr(api_response, 'message', 'Unknown API Error')}
         except ApiException as e:
-            print(f"Exception when calling OrderApi->place_order: {e}")
-            return None
+            # Handle specific Upstox error messages
+            import json
+            error_msg = str(e)
+            try:
+                err_data = json.loads(e.body)
+                error_msg = err_data.get('errors', [{}])[0].get('message', str(e))
+            except:
+                pass
+            print(f"CRITICAL ERROR: Order placement failed - {error_msg}")
+            return {'status': 'error', 'message': error_msg}
+        except Exception as e:
+            print(f"CRITICAL UNKNOWN ERROR: {e}")
+            return {'status': 'error', 'message': str(e)}
+
+    def get_funds(self):
+        """
+        Get available margin/funds for the user.
+        """
+        try:
+            api_response = self.user_api.get_user_fund_margin(api_version='2.0')
+            if api_response.status == 'success':
+                # Upstox SDK returns objects. 
+                # Structure is usually data.equity.available_margin
+                data = getattr(api_response, 'data', None)
+                if data:
+                    equity = getattr(data, 'equity', None)
+                    if equity:
+                        return getattr(equity, 'available_margin', 0.0)
+        except Exception as e:
+            print(f"Error fetching funds: {e}")
+        return 0.0

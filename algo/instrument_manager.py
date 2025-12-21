@@ -112,6 +112,63 @@ class InstrumentMaster:
             
         return weekly, monthly
 
+    def get_special_entry_expiries(self, underlying_symbol='NIFTY'):
+        """
+        Target: 
+        1. Next month's first weekly
+        2. Next-Next month's monthly
+        Used for entry at 3:15 PM on the current month's expiry day.
+        """
+        expiries = self.get_expiry_dates(underlying_symbol)
+        if not expiries:
+            return None, None
+            
+        today = date.today()
+        
+        # 1. Find Next Month
+        current_month = today.month
+        current_year = today.year
+        
+        next_month = current_month + 1
+        next_year = current_year
+        if next_month > 12:
+            next_month = 1
+            next_year += 1
+            
+        # 2. Find Next-Next Month
+        nn_month = next_month + 1
+        nn_year = next_year
+        if nn_month > 12:
+            nn_month = 1
+            nn_year += 1
+            
+        # Select Next Month's First Weekly
+        # (Assuming the first expiry in next month is the one we want)
+        next_month_expiries = [d for d in expiries if d.year == next_year and d.month == next_month]
+        weekly_target = next_month_expiries[0] if next_month_expiries else None
+        
+        # Select Next-Next Month's Monthly (Last of that month)
+        nn_month_expiries = [d for d in expiries if d.year == nn_year and d.month == nn_month]
+        monthly_target = nn_month_expiries[-1] if nn_month_expiries else None
+        
+        return weekly_target, monthly_target
+
+    def is_monthly_expiry_today(self, underlying_symbol='NIFTY'):
+        """Checks if today is the monthly expiry day for the underlying."""
+        expiries = self.get_expiry_dates(underlying_symbol)
+        if not expiries:
+            return False
+            
+        today = date.today()
+        
+        # A day is a monthly expiry if it is the LAST expiry of the current month
+        current_month_expiries = [d for d in expiries if d.year == today.year and d.month == today.month]
+        if not current_month_expiries:
+            return False
+            
+        last_of_month = current_month_expiries[-1]
+        return today == last_of_month
+
     def get_option_symbols(self, underlying_symbol='NIFTY', expiry_date=None, option_type='PE'):
         if self.df is None:
             self.load_master()

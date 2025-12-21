@@ -1,4 +1,8 @@
 import os
+from dotenv import load_dotenv
+
+# Load variables from .env file if it exists
+load_dotenv()
 
 # ==========================================
 # GLOABL TRADING CONFIGURATION
@@ -22,7 +26,9 @@ BACKTEST_END_DATE = '2025-10-31'
 # API CREDENTIALS
 # ==========================================
 # By default, reads from Environment Variables.
-# You can hardcode here if absolutely necessary/safe (Not Recommended).
+UPSTOX_API_KEY = os.getenv('UPSTOX_API_KEY', '')
+UPSTOX_API_SECRET = os.getenv('UPSTOX_API_SECRET', '')
+UPSTOX_REDIRECT_URI = os.getenv('UPSTOX_REDIRECT_URI', '') # Must match your Upstox App settings
 UPSTOX_ACCESS_TOKEN = os.getenv('UPSTOX_ACCESS_TOKEN', '')
 
 # ==========================================
@@ -36,17 +42,31 @@ RISK_FREE_RATE = 0.07 # 7% used for Greeks
 ENTRY_WEEKLY_DELTA_TARGET = 0.50  # Sell Weekly ATM
 ENTRY_MONTHLY_DELTA_TARGET = 0.50 # Buy Monthly ATM (Hedge)
 
+# ENTRY TIMING
+# If True, the algo will only enter new positions at 3:15 PM on Monthly Expiry Day.
+STRICT_MONTHLY_EXPIRY_ENTRY = True
+ENTRY_TIME_HHMM = "15:15"
+
 # ADJUSTMENT LOGIC - WEEKLY (SHORT LEG)
-WEEKLY_ADJ_TRIGGER_DELTA = 0.80   # Roll if delta >= this (ITM)
-WEEKLY_ROLL_TARGET_DELTA = 0.50   # Roll to this fresh Delta
+WEEKLY_ADJ_TRIGGER_DELTA = 0.80       # Roll if delta >= this (ITM/Market Fall)
+WEEKLY_ADJ_TRIGGER_DELTA_LOW = 0.10   # Roll if delta <= this (OTM/Market Rise)
+WEEKLY_ROLL_TARGET_DELTA = 0.50       # Roll to this fresh Delta (ATM)
 
 # ADJUSTMENT LOGIC - MONTHLY (LONG LEG)
-MONTHLY_ADJ_TRIGGER_DELTA = 0.90  # Roll if delta > this (Deep ITM)
-MONTHLY_ROLL_TARGET_DELTA = 0.35  # Roll to this Delta (OTM Hedge)
+MONTHLY_ADJ_TRIGGER_DELTA = 0.90      # Roll if delta >= this (Deep ITM/Market Fall)
+MONTHLY_ADJ_TRIGGER_DELTA_LOW = 0.10  # Roll if delta <= this (OTM/Market Rise)
+MONTHLY_ROLL_TARGET_DELTA_FALL = 0.50 # Roll to this Delta (ATM)
+MONTHLY_ROLL_TARGET_DELTA_RISE = 0.35 # Roll to this Delta (OTM/Hedge)
 
 # ==========================================
 # EXECUTION SETTINGS
 # ==========================================
+# --- RISK MANAGEMENT ---
+MAX_LOSS_VALUE = 15000      # Exit all if loss exceeds this INR value. Set to 0 to DISABLE.
+MAX_ALLOWED_VIX = 25.0     # Don't enter if VIX is above this (High Risk)
+MIN_REQUIRED_CASH = 50000 # Minimum free cash buffer required to run
+ROLLOVER_WEEKDAY = 0       # 0=Monday, 4=Friday (Friday is safer for gaps)
+AUTO_EXIT_BEFORE_MONTHLY_EXPIRY_3PM = True # Exit everything at 3 PM ONE DAY BEFORE Monthly Expiry
 POLL_INTERVAL_SECONDS = 5
 ORDER_QUANTITY = 75 # 1 Lot for Nifty
 ORDER_PRODUCT = 'D' # Delivery (D) or Intraday (I)
