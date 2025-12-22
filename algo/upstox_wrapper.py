@@ -1,7 +1,10 @@
 import os
+import time
+import random
 import upstox_client
 from upstox_client.rest import ApiException
 import config
+import threading
 
 class UpstoxWrapper:
     def __init__(self, access_token=None):
@@ -25,6 +28,49 @@ class UpstoxWrapper:
         self.order_api = upstox_client.OrderApi(self.api_client)
         self.user_api = upstox_client.UserApi(self.api_client)
         self.market_quote_api = upstox_client.MarketQuoteApi(self.api_client)
+        
+        # Rate limiting state
+        self._last_call_time = 0
+        self._rate_limit_lock = threading.Lock()
+        self._mandatory_delay = 1.0 # 1 second between any two API calls
+
+    def _wait_for_rate_limit(self):
+        """Ensures at least _mandatory_delay seconds have passed since the last API call."""
+        with self._rate_limit_lock:
+            now = time.time()
+            elapsed = now - self._last_call_time
+            if elapsed < self._mandatory_delay:
+                wait_to_sleep = self._mandatory_delay - elapsed
+                time.sleep(wait_to_sleep)
+            self._last_call_time = time.time()
+
+    def _safe_ltp_call(self, symbol, max_retries=5):
+        """
+        Helper to call the ltp API with aggressive retry logic for 429 (Too Many Requests).
+        Uses exponential backoff with jitter and mandatory inter-call delay.
+        """
+        retries = 0
+        while retries <= max_retries:
+            self._wait_for_rate_limit()
+            try:
+                return self.market_quote_api.ltp(symbol=symbol, api_version='2.0')
+            except ApiException as e:
+                if e.status == 429:
+                    retries += 1
+                    if retries > max_retries:
+                        print(f"ERROR: Max retries ({max_retries}) reached for 429 error on {symbol}.")
+                        raise e
+                    
+                    # More aggressive backoff: 5, 10, 20, 40, 80...
+                    wait_time = (5 * (2 ** (retries - 1))) + (random.randint(0, 2000) / 1000)
+                    print(f"CRITICAL WARNING: 429 Too Many Requests. Burst detected. Retrying in {wait_time:.2f}s (Attempt {retries}/{max_retries})...")
+                    time.sleep(wait_time)
+                elif e.status == 401:
+                    print("CRITICAL: Unauthorized. Check your UPSTOX_ACCESS_TOKEN.")
+                    os._exit(1)
+                else:
+                    raise e
+        return None
 
     def get_spot_price(self, instrument_key):
         """
@@ -33,8 +79,8 @@ class UpstoxWrapper:
         """
         try:
             # Full market quote
-            api_response = self.market_quote_api.ltp(symbol=instrument_key, api_version='2.0')
-            if api_response.status == 'success':
+            api_response = self._safe_ltp_call(symbol=instrument_key)
+            if api_response and api_response.status == 'success':
                 # The API sometimes returns keys with : instead of | in the dictionary
                 res_key = instrument_key.replace('|', ':')
                 if instrument_key in api_response.data:
@@ -48,50 +94,36 @@ class UpstoxWrapper:
                     return api_response.data[first_key].last_price
                     
             return None
-        except ApiException as e:
-            if e.status == 401:
-                print("CRITICAL: Unauthorized. Check your UPSTOX_ACCESS_TOKEN.")
-                os._exit(1) # Force exit to stop loop
-            print(f"Exception when calling MarketQuoteApi->ltp: {e}")
+        except Exception as e:
+            print(f"Exception when fetching spot price: {e}")
             return None
 
     def get_option_chain_quotes(self, instrument_keys):
         """
         Get quotes for a list of option keys to build a chain.
-        Upstox doesn't have a single "Get Option Chain" endpoint that returns Greeks nicely in one shot for all strikes.
-        Usually we must construct the list of keys we want (e.g., Nifty 21000 CE, 21000 PE) and ask for quotes.
-        
-        For this simplified algo, we might need a way to map "Strike" -> "Instrument Key".
-        This typically involves downloading the master contract list.
         """
+        if not instrument_keys:
+            return {}
+            
         try:
             # quotes for multiple symbols
             symbols_str = ",".join(instrument_keys)
-            api_response = self.market_quote_api.ltp(symbol=symbols_str, api_version='2.0')
-            if api_response.status == 'success':
+            api_response = self._safe_ltp_call(symbol=symbols_str)
+            if api_response and api_response.status == 'success':
                 # Normalize keys in response back to | (pipe) to match our internal keys
-                # CRITICAL: For options, the response key is often the Symbol, 
-                # but we might have requested by ID. 
-                # We should use 'instrument_token' from within the data if available.
                 normalized_data = {}
                 for key, val in api_response.data.items():
-                    # val is a MarketQuoteSymbolLtp object
-                    # It has instrument_token like 'NSE_FO|54321'
                     token = getattr(val, 'instrument_token', None)
                     if token:
                         norm_token = token.replace(':', '|')
                         normalized_data[norm_token] = val
                     
-                    # Also keep the symbol-based key as fallback
                     norm_key = key.replace(':', '|')
                     normalized_data[norm_key] = val
                     
                 return normalized_data
             return {}
-        except ApiException as e:
-            if e.status == 401:
-                print("CRITICAL: Unauthorized. Check your UPSTOX_ACCESS_TOKEN.")
-                os._exit(1)
+        except Exception as e:
             print(f"Error getting quotes: {e}")
             return {}
 
@@ -147,6 +179,7 @@ class UpstoxWrapper:
         Get available margin/funds for the user.
         """
         try:
+            self._wait_for_rate_limit()
             api_response = self.user_api.get_user_fund_margin(api_version='2.0')
             if api_response.status == 'success':
                 # Upstox SDK returns objects. 

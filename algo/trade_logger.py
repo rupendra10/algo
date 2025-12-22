@@ -3,10 +3,15 @@ import os
 import json
 from datetime import datetime
 from colorama import Fore, Style
+import config
 
 class TradeJournal:
     def __init__(self, filename="trade_log.csv"):
-        self.filename = filename
+        # Add trading mode to filename
+        mode = config.TRADING_MODE.lower()
+        # Insert mode before .csv extension
+        base_name = filename.replace('.csv', '')
+        self.filename = f"{base_name}_{mode}.csv"
         self.state_file = "strategy_state.json"
         self.headers = ['timestamp', 'instrument_key', 'side', 'qty', 'price', 'tag', 'pnl']
         self._initialize_file()
@@ -52,19 +57,42 @@ class TradeJournal:
         pnl_color = Fore.GREEN if total_pnl >= 0 else Fore.RED
         
         print("\n" + "="*50)
-        print(f"💰 {Fore.CYAN}TRADE SESSION SUMMARY{Style.RESET_ALL} 💰")
+        print(f"{Fore.CYAN}TRADE SESSION SUMMARY{Style.RESET_ALL}")
         print("="*50)
-        print(f"Closed P&L:    {Fore.WHITE}₹{self.closed_pnl:,.2f}{Style.RESET_ALL}")
-        print(f"Open P&L:      {Fore.WHITE}₹{open_pnl:,.2f}{Style.RESET_ALL}")
-        print(f"Total P&L:     {pnl_color}₹{total_pnl:,.2f}{Style.RESET_ALL}")
+        print(f"Closed P&L:    {Fore.WHITE}INR {self.closed_pnl:,.2f}{Style.RESET_ALL}")
+        print(f"Open P&L:      {Fore.WHITE}INR {open_pnl:,.2f}{Style.RESET_ALL}")
+        print(f"Total P&L:     {pnl_color}INR {total_pnl:,.2f}{Style.RESET_ALL}")
         print("-" * 50)
         
-        if strategy_state['weekly']:
+        if strategy_state.get('weekly'):
             w = strategy_state['weekly']
-            print(f"OPEN Weekly:   {Fore.YELLOW}{w['strike']} Put{Style.RESET_ALL} @ {w['entry_price']} (Current: {strategy_state['weekly_ltp']})")
-        if strategy_state['monthly']:
+            print(f"OPEN Weekly:   {Fore.YELLOW}{w['strike']} Put{Style.RESET_ALL} @ {w['entry_price']} (Current: {strategy_state.get('weekly_ltp', 'N/A')})")
+        if strategy_state.get('monthly'):
             m = strategy_state['monthly']
-            print(f"OPEN Monthly:  {Fore.YELLOW}{m['strike']} Put{Style.RESET_ALL} @ {m['entry_price']} (Current: {strategy_state['monthly_ltp']})")
+            print(f"OPEN Monthly:  {Fore.YELLOW}{m['strike']} Put{Style.RESET_ALL} @ {m['entry_price']} (Current: {strategy_state.get('monthly_ltp', 'N/A')})")
+        
+        # Generic Position Support
+        if strategy_state.get('positions'):
+            # Extract expiry date from first position for header
+            first_pos = strategy_state['positions'][0] if strategy_state['positions'] else {}
+            expiry_info = first_pos.get('expiry_dt', 'N/A')
+            
+            print("-" * 25 + f" Open Legs (Expiry: {expiry_info}) " + "-" * 25)
+            for p in strategy_state['positions']:
+                side_col = Fore.GREEN if p['side'] == 'BUY' else Fore.RED
+                qty = p['qty']
+                entry = p['entry_price']
+                ltp = p.get('ltp', 0.0)
+                
+                # Calculate "Points" (Normalized to standard lot for easy strategy review)
+                # If QTY=150 and Lot=75, multiplier is 2. Multiplier * Price = Points.
+                multiplier = qty / config.ORDER_QUANTITY
+                net_points_entry = entry * multiplier
+                net_points_ltp = ltp * multiplier if isinstance(ltp, (int, float)) else 0.0
+                
+                print(f"{side_col}{p['side']} {qty} {p.get('type','')} {p.get('strike','')} @ {entry}{Style.RESET_ALL} "
+                      f"(LTP: {ltp} | Net Points: {net_points_ltp:.2f})")
+        
         print("="*50 + "\n")
 
     def save_state(self, weekly_pos, monthly_pos):

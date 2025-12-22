@@ -13,6 +13,7 @@ load_dotenv()
 # 'LIVE': Executes REAL orders on Upstox.
 # 'BACKTEST': Replays historical data from CSV files.
 TRADING_MODE = 'PAPER' 
+ACTIVE_STRATEGIES = [  'WeeklyIronfly'] #CalendarPEWeekly, WeeklyIronfly
 
 # ==========================================
 # BACKTEST CONFIGURATION
@@ -59,6 +60,21 @@ MONTHLY_ROLL_TARGET_DELTA_FALL = 0.50 # Roll to this Delta (ATM)
 MONTHLY_ROLL_TARGET_DELTA_RISE = 0.35 # Roll to this Delta (OTM/Hedge)
 
 # ==========================================
+# WEEKLY IRONFLY (PUT BUTTERFLY) PARAMETERS
+# ==========================================
+IRONFLY_CAPITAL = 180000        # Potential total capital (used for SL/Target calc)
+IRONFLY_SL_PERCENT = 0.01       # 1% adjustment/exit trigger
+IRONFLY_TARGET_PERCENT = 0.03   # 3% target (can be adjusted to 5% for higher risk/reward)
+IRONFLY_ENTRY_WEEKDAY = 1       # 1 = Tuesday
+IRONFLY_ENTRY_TIME = "12:00"
+IRONFLY_EXIT_TIME = "15:00"     # On Expiry Day
+
+IRONFLY_LEG1_OFFSET = -50       # Buy Put strike relative to ATM
+IRONFLY_LEG2_OFFSET = -250      # Sell 2 Puts strike relative to ATM
+IRONFLY_LEG3_OFFSET = -450      # Buy Put strike (hedge) relative to ATM
+IRONFLY_ADJ_INWARD_OFFSET = 100 # Internal offset from Leg 1 for Call Calendar
+
+# ==========================================
 # EXECUTION SETTINGS
 # ==========================================
 # --- RISK MANAGEMENT ---
@@ -67,7 +83,7 @@ MAX_ALLOWED_VIX = 25.0     # Don't enter if VIX is above this (High Risk)
 MIN_REQUIRED_CASH = 50000 # Minimum free cash buffer required to run
 ROLLOVER_WEEKDAY = 0       # 0=Monday, 4=Friday (Friday is safer for gaps)
 AUTO_EXIT_BEFORE_MONTHLY_EXPIRY_3PM = True # Exit everything at 3 PM ONE DAY BEFORE Monthly Expiry
-POLL_INTERVAL_SECONDS = 5
+POLL_INTERVAL_SECONDS = 30
 ORDER_QUANTITY = 75 # 1 Lot for Nifty
 ORDER_PRODUCT = 'D' # Delivery (D) or Intraday (I)
 ORDER_VALIDITY = 'DAY'

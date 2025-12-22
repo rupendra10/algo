@@ -24,6 +24,9 @@ def calculate_delta(flag, S, K, t, r, sigma):
             else:
                  return -1.0 if S < K else 0.0
 
+        # Clamp sigma to prevent overflow (max ~10 = 1000% IV)
+        sigma = np.clip(sigma, 0.001, 10.0)
+        
         d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * t) / (sigma * np.sqrt(t))
         
         if flag.lower() == 'c':

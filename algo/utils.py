@@ -2,6 +2,11 @@ import numpy as np
 from scipy.stats import norm
 
 def black_scholes_price(flag, S, K, t, r, sigma):
+    # Clamp sigma to prevent overflow (max ~10 = 1000% IV)
+    sigma = np.clip(sigma, 0.001, 10.0)
+    if t <= 0:
+        t = 0.0001
+    
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * t) / (sigma * np.sqrt(t))
     d2 = d1 - sigma * np.sqrt(t)
     
@@ -13,6 +18,11 @@ def black_scholes_price(flag, S, K, t, r, sigma):
     return price
 
 def _vega(S, K, t, r, sigma):
+    # Clamp sigma to prevent overflow
+    sigma = np.clip(sigma, 0.001, 10.0)
+    if t <= 0:
+        t = 0.0001
+    
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * t) / (sigma * np.sqrt(t))
     return S * norm.pdf(d1) * np.sqrt(t)
 
@@ -50,5 +60,8 @@ def calculate_implied_volatility(price, S, K, t, r, flag='p'):
             break
             
         sigma = sigma + diff / v
+        
+        # Clamp sigma during iterations to prevent overflow
+        sigma = np.clip(sigma, 0.001, 10.0)
         
     return sigma
