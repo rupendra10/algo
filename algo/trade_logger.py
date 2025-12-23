@@ -12,8 +12,7 @@ class TradeJournal:
         # Insert mode before .csv extension
         base_name = filename.replace('.csv', '')
         self.filename = f"{base_name}_{mode}.csv"
-        self.state_file = "strategy_state.json"
-        self.headers = ['timestamp', 'instrument_key', 'side', 'qty', 'price', 'tag', 'pnl']
+        self.headers = ['timestamp', 'instrument_key', 'side', 'qty', 'price', 'expiry', 'tag', 'pnl']
         self._initialize_file()
         self.closed_pnl = 0.0
         self._calculate_fixed_pnl()
@@ -36,7 +35,7 @@ class TradeJournal:
         except Exception:
             pass
 
-    def log_trade(self, instrument_key, side, qty, price, tag, pnl=None):
+    def log_trade(self, instrument_key, side, qty, price, tag, expiry='N/A', pnl=None):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(self.filename, 'a', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=self.headers)
@@ -46,6 +45,7 @@ class TradeJournal:
                 'side': side,
                 'qty': qty,
                 'price': price,
+                'expiry': expiry,
                 'tag': tag,
                 'pnl': pnl
             })
@@ -66,10 +66,14 @@ class TradeJournal:
         
         if strategy_state.get('weekly'):
             w = strategy_state['weekly']
-            print(f"OPEN Weekly:   {Fore.YELLOW}{w['strike']} Put{Style.RESET_ALL} @ {w['entry_price']} (Current: {strategy_state.get('weekly_ltp', 'N/A')})")
+            inst_type = 'Call' if w.get('type') == 'c' else 'Put'
+            expiry_str = w.get('expiry_dt', 'N/A')
+            print(f"OPEN Weekly:   {Fore.YELLOW}{w['strike']} {inst_type}{Style.RESET_ALL} @ {w['entry_price']} (Expiry: {expiry_str} | Current: {strategy_state.get('weekly_ltp', 'N/A')})")
         if strategy_state.get('monthly'):
             m = strategy_state['monthly']
-            print(f"OPEN Monthly:  {Fore.YELLOW}{m['strike']} Put{Style.RESET_ALL} @ {m['entry_price']} (Current: {strategy_state.get('monthly_ltp', 'N/A')})")
+            inst_type = 'Call' if m.get('type') == 'c' else 'Put'
+            expiry_str = m.get('expiry_dt', 'N/A')
+            print(f"OPEN Monthly:  {Fore.YELLOW}{m['strike']} {inst_type}{Style.RESET_ALL} @ {m['entry_price']} (Expiry: {expiry_str} | Current: {strategy_state.get('monthly_ltp', 'N/A')})")
         
         # Generic Position Support
         if strategy_state.get('positions'):
@@ -94,23 +98,3 @@ class TradeJournal:
                       f"(LTP: {ltp} | Net Points: {net_points_ltp:.2f})")
         
         print("="*50 + "\n")
-
-    def save_state(self, weekly_pos, monthly_pos):
-        """Saves current positions to a JSON file."""
-        state = {
-            'weekly': weekly_pos,
-            'monthly': monthly_pos,
-            'last_updated': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-        with open(self.state_file, 'w') as f:
-            json.dump(state, f, indent=4)
-
-    def load_state(self):
-        """Loads positions from the JSON file."""
-        if os.path.exists(self.state_file):
-            try:
-                with open(self.state_file, 'r') as f:
-                    return json.load(f)
-            except Exception as e:
-                print(f"Error loading state: {e}")
-        return None

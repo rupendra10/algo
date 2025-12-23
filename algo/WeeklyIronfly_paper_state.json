@@ -1,31 +1,31 @@
 {
     "positions": [
         {
-            "instrument_key": "NSE_FO|65599",
+            "instrument_key": "NSE_FO|65634",
             "qty": 75,
             "side": "BUY",
-            "entry_price": 85.0,
-            "strike": 25900.0,
+            "entry_price": 89.95,
+            "strike": 26150.0,
             "type": "PE",
             "tag": "IF_LEG1",
             "expiry_dt": "2025-12-30"
         },
         {
-            "instrument_key": "NSE_FO|65560",
+            "instrument_key": "NSE_FO|65620",
             "qty": 150,
             "side": "SELL",
-            "entry_price": 40.0,
-            "strike": 25700.0,
+            "entry_price": 35.3,
+            "strike": 25950.0,
             "type": "PE",
             "tag": "IF_LEG2",
             "expiry_dt": "2025-12-30"
         },
         {
-            "instrument_key": "NSE_FO|65552",
+            "instrument_key": "NSE_FO|65562",
             "qty": 75,
             "side": "BUY",
-            "entry_price": 19.55,
-            "strike": 25500.0,
+            "entry_price": 13.85,
+            "strike": 25750.0,
             "type": "PE",
             "tag": "IF_LEG3",
             "expiry_dt": "2025-12-30"

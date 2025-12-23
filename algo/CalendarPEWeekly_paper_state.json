@@ -2,21 +2,22 @@
     "weekly": {
         "leg": "weekly_sell",
         "strike": 26150.0,
-        "expiry": 0.0014814779945459156,
-        "iv": 0.1554475420556564,
-        "delta": 0.5246491922790871,
-        "entry_spot": 26137.15,
-        "instrument_key": "NSE_FO|57019",
-        "entry_price": 67.6
+        "expiry": 0.0001,
+        "iv": 0.16829152383115895,
+        "delta": 0.3520422969555018,
+        "entry_spot": 26166.5,
+        "instrument_key": "NSE_FO|57013",
+        "entry_price": 27.15
     },
     "monthly": {
         "leg": "monthly_buy",
-        "strike": 26150.0,
-        "expiry": 0.09737188895345002,
-        "iv": 0.0876445423584457,
-        "delta": 0.43702226222014495,
-        "entry_spot": 25966.4,
-        "instrument_key": "NSE_FO|58808",
-        "entry_price": 287.0
-    }
+        "strike": 26350.0,
+        "expiry": 0.09412407055286023,
+        "iv": 0.09813332572820438,
+        "delta": 0.4942849700842309,
+        "entry_spot": 26188.6,
+        "instrument_key": "NSE_FO|58815",
+        "entry_price": 320.55
+    },
+    "last_rollover_date": null
 }

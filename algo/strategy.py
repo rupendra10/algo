@@ -147,8 +147,11 @@ class CalendarPEWeekly(BaseStrategy):
             self.save_state()
             return
 
-        # 4. Check Adjustments
-        adjustment_made = self.check_adjustments(spot_price, weekly_chain, monthly_chain, order_callback=order_callback)
+        # 4. Check Adjustments (ONLY on candle marks)
+        can_adjust = market_data.get('can_adjust', True)
+        adjustment_made = False
+        if can_adjust:
+            adjustment_made = self.check_adjustments(spot_price, weekly_chain, monthly_chain, order_callback=order_callback)
         if adjustment_made:
             self.save_state()
 
@@ -171,6 +174,10 @@ class CalendarPEWeekly(BaseStrategy):
         min_diff = float('inf')
         
         for opt in chain:
+            # ONLY consider options of the requested type (p or c)
+            if opt.get('type') != option_type:
+                continue
+                
             d = calculate_delta(option_type, spot, opt['strike'], opt['time_to_expiry'], self.risk_free_rate, opt['iv'])
             # Put delta is usually negative (-0.5). User spec says "0.45-0.55". 
             # We'll assume we look at absolute delta or the standard definition.
@@ -209,7 +216,7 @@ class CalendarPEWeekly(BaseStrategy):
         # 2. Execute Entry (SELL Weekly first, then BUY Monthly)
         if order_callback:
             # Sell Weekly
-            resp_w = order_callback(weekly_leg['instrument_key'], config.ORDER_QUANTITY, 'SELL', 'WEEKLY_ENTRY')
+            resp_w = order_callback(weekly_leg['instrument_key'], config.ORDER_QUANTITY, 'SELL', 'WEEKLY_ENTRY', expiry=weekly_leg.get('expiry_dt'))
             if resp_w and (resp_w.get('status') == 'success'):
                 # Capture execution price
                 entry_price = resp_w.get('avg_price', weekly_leg.get('ltp', 0.0))
@@ -221,16 +228,18 @@ class CalendarPEWeekly(BaseStrategy):
                     'delta': weekly_leg['calculated_delta'],
                     'entry_spot': spot,
                     'instrument_key': weekly_leg['instrument_key'],
-                    'entry_price': entry_price
+                    'entry_price': entry_price,
+                    'type': weekly_leg.get('type', 'p'),
+                    'expiry_dt': weekly_leg.get('expiry_dt')
                 }
-                self.journal.log_trade(weekly_leg['instrument_key'], 'SELL', config.ORDER_QUANTITY, entry_price, 'WEEKLY_ENTRY')
+                self.journal.log_trade(weekly_leg['instrument_key'], 'SELL', config.ORDER_QUANTITY, entry_price, 'WEEKLY_ENTRY', expiry=weekly_leg.get('expiry_dt'))
                 self.log(f"ENTRY: SOLD Weekly Put | Strike: {weekly_leg['strike']} | Price: {entry_price} | Expiry: {weekly_leg['expiry_dt']} | Delta: {weekly_leg['calculated_delta']:.2f}")
             else:
                 self.log(f"CRITICAL ERROR: Weekly Sell Order FAILED.")
                 return
 
             # Buy Monthly
-            resp_m = order_callback(monthly_leg['instrument_key'], config.ORDER_QUANTITY, 'BUY', 'MONTHLY_ENTRY')
+            resp_m = order_callback(monthly_leg['instrument_key'], config.ORDER_QUANTITY, 'BUY', 'MONTHLY_ENTRY', expiry=monthly_leg.get('expiry_dt'))
             if resp_m and (resp_m.get('status') == 'success'):
                 # Capture execution price
                 entry_price_m = resp_m.get('avg_price', monthly_leg.get('ltp', 0.0))
@@ -242,18 +251,20 @@ class CalendarPEWeekly(BaseStrategy):
                     'delta': monthly_leg['calculated_delta'],
                     'entry_spot': spot,
                     'instrument_key': monthly_leg['instrument_key'],
-                    'entry_price': entry_price_m
+                    'entry_price': entry_price_m,
+                    'type': monthly_leg.get('type', 'p'),
+                    'expiry_dt': monthly_leg.get('expiry_dt')
                 }
-                self.journal.log_trade(monthly_leg['instrument_key'], 'BUY', config.ORDER_QUANTITY, entry_price_m, 'MONTHLY_ENTRY')
+                self.journal.log_trade(monthly_leg['instrument_key'], 'BUY', config.ORDER_QUANTITY, entry_price_m, 'MONTHLY_ENTRY', expiry=monthly_leg.get('expiry_dt'))
                 self.log(f"ENTRY: BOUGHT Monthly Put | Strike: {monthly_leg['strike']} | Price: {entry_price_m} | Expiry: {monthly_leg['expiry_dt']} | Delta: {monthly_leg['calculated_delta']:.2f}")
             else:
                 self.log(f"CRITICAL ERROR: Monthly Buy Order FAILED.")
                 # EMERGENCY: Weekly was sold, but Monthly failed. Must square off Weekly immediately!
                 self.log("EMERGENCY: Squaring off Weekly leg.")
-                resp_exit = order_callback(weekly_leg['instrument_key'], config.ORDER_QUANTITY, 'BUY', 'EMERGENCY_EXIT')
+                resp_exit = order_callback(weekly_leg['instrument_key'], config.ORDER_QUANTITY, 'BUY', 'EMERGENCY_EXIT', expiry=weekly_leg.get('expiry_dt'))
                 exit_price = resp_exit.get('avg_price', 0.0)
                 pnl = (self.weekly_position['entry_price'] - exit_price) * config.ORDER_QUANTITY
-                self.journal.log_trade(weekly_leg['instrument_key'], 'BUY', config.ORDER_QUANTITY, exit_price, 'EMERGENCY_EXIT', pnl=pnl)
+                self.journal.log_trade(weekly_leg['instrument_key'], 'BUY', config.ORDER_QUANTITY, exit_price, 'EMERGENCY_EXIT', expiry=weekly_leg.get('expiry_dt'), pnl=pnl)
                 self.weekly_position = None
                 return
         # else:
@@ -264,13 +275,15 @@ class CalendarPEWeekly(BaseStrategy):
         Re-calculate deltas for existing positions based on new spot/time/iv
         """
         if self.weekly_position:
-            d = calculate_delta('p', spot, self.weekly_position['strike'], current_time_to_expiry_weekly, self.risk_free_rate, weekly_iv)
+            p_type = self.weekly_position.get('type', 'p') # Default to Put for safety
+            d = calculate_delta(p_type, spot, self.weekly_position['strike'], current_time_to_expiry_weekly, self.risk_free_rate, weekly_iv)
             self.weekly_position['delta'] = abs(d)
             # update expiry/iv references if provided dynamic
             self.weekly_position['expiry'] = current_time_to_expiry_weekly
         
         if self.monthly_position:
-            d = calculate_delta('p', spot, self.monthly_position['strike'], current_time_to_expiry_monthly, self.risk_free_rate, monthly_iv)
+            p_type = self.monthly_position.get('type', 'p')
+            d = calculate_delta(p_type, spot, self.monthly_position['strike'], current_time_to_expiry_monthly, self.risk_free_rate, monthly_iv)
             self.monthly_position['delta'] = abs(d)
             self.monthly_position['expiry'] = current_time_to_expiry_monthly
 
@@ -320,12 +333,12 @@ class CalendarPEWeekly(BaseStrategy):
 
         # 2. Exit Existing
         if order_callback and self.weekly_position:
-            resp_exit = order_callback(self.weekly_position['instrument_key'], config.ORDER_QUANTITY, 'BUY', 'WEEKLY_EXIT_ADJ')
+            resp_exit = order_callback(self.weekly_position['instrument_key'], config.ORDER_QUANTITY, 'BUY', 'WEEKLY_EXIT_ADJ', expiry=self.weekly_position.get('expiry_dt'))
             if (resp_exit and resp_exit.get('status') == 'success'):
                 # PNL = (Entry - Exit) for Sell side
                 exit_price = resp_exit.get('avg_price', 0.0)
                 pnl = (self.weekly_position['entry_price'] - exit_price) * config.ORDER_QUANTITY
-                self.journal.log_trade(self.weekly_position['instrument_key'], 'BUY', config.ORDER_QUANTITY, exit_price, 'WEEKLY_EXIT_ADJ', pnl=pnl)
+                self.journal.log_trade(self.weekly_position['instrument_key'], 'BUY', config.ORDER_QUANTITY, exit_price, 'WEEKLY_EXIT_ADJ', expiry=self.weekly_position.get('expiry_dt'), pnl=pnl)
             else:
                 self.log(f"CRITICAL ERROR: Weekly Exit Order FAILED. Aborting adjustment to prevent double selling.")
                 return
@@ -334,7 +347,7 @@ class CalendarPEWeekly(BaseStrategy):
         
         # 3. Enter New
         if order_callback:
-            resp_entry = order_callback(new_leg['instrument_key'], config.ORDER_QUANTITY, 'SELL', 'WEEKLY_ROLL_ENTRY')
+            resp_entry = order_callback(new_leg['instrument_key'], config.ORDER_QUANTITY, 'SELL', 'WEEKLY_ROLL_ENTRY', expiry=new_leg.get('expiry_dt'))
             if resp_entry and (resp_entry.get('status') == 'success'):
                 entry_price = resp_entry.get('avg_price', new_leg.get('ltp', 0.0))
                 self.weekly_position = {
@@ -345,9 +358,11 @@ class CalendarPEWeekly(BaseStrategy):
                     'delta': new_leg['calculated_delta'],
                     'entry_spot': spot,
                     'instrument_key': new_leg['instrument_key'],
-                    'entry_price': entry_price
+                    'entry_price': entry_price,
+                    'type': new_leg.get('type', 'p'),
+                    'expiry_dt': new_leg.get('expiry_dt')
                 }
-                self.journal.log_trade(new_leg['instrument_key'], 'SELL', config.ORDER_QUANTITY, entry_price, 'WEEKLY_ROLL_ENTRY')
+                self.journal.log_trade(new_leg['instrument_key'], 'SELL', config.ORDER_QUANTITY, entry_price, 'WEEKLY_ROLL_ENTRY', expiry=new_leg.get('expiry_dt'))
                 self.log(f"ADJUSTMENT ENTRY: SOLD Weekly ATM Put | Strike: {new_leg['strike']} | Price: {entry_price} | Delta: {new_leg['calculated_delta']:.2f}")
             else:
                 self.log(f"CRITICAL ERROR: Weekly Roll Entry FAILED. Currently NAKED.")
@@ -361,12 +376,12 @@ class CalendarPEWeekly(BaseStrategy):
 
         # 2. Exit Existing
         if order_callback and self.monthly_position:
-            resp_exit = order_callback(self.monthly_position['instrument_key'], config.ORDER_QUANTITY, 'SELL', 'MONTHLY_EXIT_ADJ')
+            resp_exit = order_callback(self.monthly_position['instrument_key'], config.ORDER_QUANTITY, 'SELL', 'MONTHLY_EXIT_ADJ', expiry=self.monthly_position.get('expiry_dt'))
             if (resp_exit and resp_exit.get('status') == 'success'):
                 # PNL = (Exit - Entry) for Buy side
                 exit_price = resp_exit.get('avg_price', 0.0)
                 pnl = (exit_price - self.monthly_position['entry_price']) * config.ORDER_QUANTITY
-                self.journal.log_trade(self.monthly_position['instrument_key'], 'SELL', config.ORDER_QUANTITY, exit_price, 'MONTHLY_EXIT_ADJ', pnl=pnl)
+                self.journal.log_trade(self.monthly_position['instrument_key'], 'SELL', config.ORDER_QUANTITY, exit_price, 'MONTHLY_EXIT_ADJ', expiry=self.monthly_position.get('expiry_dt'), pnl=pnl)
             else:
                 self.log(f"CRITICAL ERROR: Monthly Exit Order FAILED. Aborting adjustment.")
                 return
@@ -375,7 +390,7 @@ class CalendarPEWeekly(BaseStrategy):
         
         # 3. Enter New
         if order_callback:
-            resp_entry = order_callback(new_leg['instrument_key'], config.ORDER_QUANTITY, 'BUY', 'MONTHLY_ROLL_ENTRY')
+            resp_entry = order_callback(new_leg['instrument_key'], config.ORDER_QUANTITY, 'BUY', 'MONTHLY_ROLL_ENTRY', expiry=new_leg.get('expiry_dt'))
             if resp_entry and (resp_entry.get('status') == 'success'):
                 entry_price = resp_entry.get('avg_price', new_leg.get('ltp', 0.0))
                 self.monthly_position = {
@@ -386,9 +401,11 @@ class CalendarPEWeekly(BaseStrategy):
                     'delta': new_leg['calculated_delta'],
                     'entry_spot': spot,
                     'instrument_key': new_leg['instrument_key'],
-                    'entry_price': entry_price
+                    'entry_price': entry_price,
+                    'type': new_leg.get('type', 'p'),
+                    'expiry_dt': new_leg.get('expiry_dt')
                 }
-                self.journal.log_trade(new_leg['instrument_key'], 'BUY', config.ORDER_QUANTITY, entry_price, 'MONTHLY_ROLL_ENTRY')
+                self.journal.log_trade(new_leg['instrument_key'], 'BUY', config.ORDER_QUANTITY, entry_price, 'MONTHLY_ROLL_ENTRY', expiry=new_leg.get('expiry_dt'))
                 self.log(f"ADJUSTMENT ENTRY: BOUGHT Monthly Put | Strike: {new_leg['strike']} | Price: {entry_price} | Delta: {new_leg['calculated_delta']:.2f}")
             else:
                 self.log(f"CRITICAL ERROR: Monthly Roll Entry FAILED. Currently UNHEDGED.")
@@ -424,19 +441,19 @@ class CalendarPEWeekly(BaseStrategy):
         self.log(f"{Fore.MAGENTA}INITIATING TOTAL STRATEGY EXIT: {reason}{Style.RESET_ALL}")
         
         if self.weekly_position and order_callback:
-            resp = order_callback(self.weekly_position['instrument_key'], config.ORDER_QUANTITY, 'BUY', f'EXIT_{reason}')
+            resp = order_callback(self.weekly_position['instrument_key'], config.ORDER_QUANTITY, 'BUY', f'EXIT_{reason}', expiry=self.weekly_position.get('expiry_dt'))
             if resp and resp.get('status') == 'success':
                 exit_price = resp.get('avg_price', 0.0)
                 pnl = (self.weekly_position['entry_price'] - exit_price) * config.ORDER_QUANTITY
-                self.journal.log_trade(self.weekly_position['instrument_key'], 'BUY', config.ORDER_QUANTITY, exit_price, f'EXIT_{reason}', pnl=pnl)
+                self.journal.log_trade(self.weekly_position['instrument_key'], 'BUY', config.ORDER_QUANTITY, exit_price, f'EXIT_{reason}', expiry=self.weekly_position.get('expiry_dt'), pnl=pnl)
                 self.log(f"Exited Weekly: {self.weekly_position['strike']} Put | Price: {exit_price} | PnL: {pnl:.2f}")
             
         if self.monthly_position and order_callback:
-            resp = order_callback(self.monthly_position['instrument_key'], config.ORDER_QUANTITY, 'SELL', f'EXIT_{reason}')
+            resp = order_callback(self.monthly_position['instrument_key'], config.ORDER_QUANTITY, 'SELL', f'EXIT_{reason}', expiry=self.monthly_position.get('expiry_dt'))
             if resp and resp.get('status') == 'success':
                 exit_price = resp.get('avg_price', 0.0)
                 pnl = (exit_price - self.monthly_position['entry_price']) * config.ORDER_QUANTITY
-                self.journal.log_trade(self.monthly_position['instrument_key'], 'SELL', config.ORDER_QUANTITY, exit_price, f'EXIT_{reason}', pnl=pnl)
+                self.journal.log_trade(self.monthly_position['instrument_key'], 'SELL', config.ORDER_QUANTITY, exit_price, f'EXIT_{reason}', expiry=self.monthly_position.get('expiry_dt'), pnl=pnl)
                 self.log(f"Exited Monthly: {self.monthly_position['strike']} Put | Price: {exit_price} | PnL: {pnl:.2f}")
             
         self.weekly_position = None
@@ -460,22 +477,22 @@ class CalendarPEWeekly(BaseStrategy):
             'last_rollover_date': self.last_rollover_date
         }
         super().save_current_state(state)
-        # legacy compatibility if needed for journal
-        self.journal.save_state(self.weekly_position, self.monthly_position)
 
     def load_previous_state(self):
         """Loads state from persistent storage."""
         state = super().load_previous_state()
-        if not state:
-            # Fallback to old name/journal for recovery of existing runs
-            state = self.journal.load_state()
         
         if state:
             self.weekly_position = state.get('weekly')
             self.monthly_position = state.get('monthly')
             self.last_rollover_date = state.get('last_rollover_date')  # Load rollover tracking
             if self.weekly_position or self.monthly_position:
-                self.log(f"{Fore.CYAN}RECOVERY: Loaded existing positions.{Style.RESET_ALL}")
+                log_msg = f"{Fore.CYAN}RECOVERY: Loaded existing positions:{Style.RESET_ALL}"
+                if self.weekly_position:
+                    log_msg += f"\n  - Weekly: {self.weekly_position['strike']} Put (Expiry: {self.weekly_position.get('expiry_dt','N/A')})"
+                if self.monthly_position:
+                    log_msg += f"\n  - Monthly: {self.monthly_position['strike']} Put (Expiry: {self.monthly_position.get('expiry_dt','N/A')})"
+                self.log(log_msg)
                 return True
         return False
 
@@ -528,6 +545,7 @@ class WeeklyIronfly(BaseStrategy):
         # 2. Check Entry Timing (Current week's expiry at 12:00 PM for NEXT week's expiry)
         if not self.positions:
             is_paper = config.TRADING_MODE == 'PAPER'
+            expiry_skipped = market_data.get('expiry_skipped', False)
             
             # In LIVE mode, check if today is current week's expiry (to enter for next week)
             is_entry_day = False
@@ -549,9 +567,12 @@ class WeeklyIronfly(BaseStrategy):
             
             is_entry_time = now.strftime("%H:%M") >= config.IRONFLY_ENTRY_TIME
             
-            if is_paper or (is_entry_day and is_entry_time):
-                # ENTRY into NEXT Weekly (nw_chain)
-                self.enter_strategy(spot_price, nw_chain, order_callback)
+            # If we skipped today's expiry, the main weekly (cw_chain) is already the next contract.
+            # We allow entry immediately as today IS technically an expiry day (just the skipped one).
+            if is_paper or (is_entry_day and is_entry_time) or expiry_skipped:
+                target_chain = cw_chain if expiry_skipped else nw_chain
+                self.log(f"Ironfly Entry Triggered | Expiry Skipped: {expiry_skipped} | Targeting: {target_chain[0]['expiry_dt'] if target_chain else 'N/A'}")
+                self.enter_strategy(spot_price, target_chain, order_callback)
                 self.save_state()
             else:
                 if now.second < 10 and now.minute % 5 == 0: # Log every 5 mins in the first 10s
@@ -585,7 +606,8 @@ class WeeklyIronfly(BaseStrategy):
             # SL / Adjustment Trigger
             elif pnl_pct <= -config.IRONFLY_SL_PERCENT:
                 if not self.is_adjusted:
-                    self.log(f"ADJUSTMENT TRIGGER: {pnl_pct*100:.2f}% loss. Building Call Calendar.")
+                    if market_data.get('can_adjust', True):
+                        self.log(f"ADJUSTMENT TRIGGER: {pnl_pct*100:.2f}% loss. Building Call Calendar.")
                     # Build Calendar: Sell CE at butterfly expiry (nw_chain), Buy CE at next expiry (cw_chain of following week)
                     # Note: We need to fetch the week AFTER nw_chain for the long Call
                     # For now, we'll use cw_chain as the next week relative to nw_chain
@@ -629,7 +651,7 @@ class WeeklyIronfly(BaseStrategy):
         
         # Execute all legs
         for i, (opt, side, qty, tag) in enumerate(zip(legs_data, sides, qtys, tags)):
-            resp = order_callback(opt['instrument_key'], qty, side, tag)
+            resp = order_callback(opt['instrument_key'], qty, side, tag, expiry=opt.get('expiry_dt'))
             if resp and resp.get('status') == 'success':
                 price = resp.get('avg_price', opt.get('ltp', 0))
                 self.positions.append({
@@ -642,8 +664,7 @@ class WeeklyIronfly(BaseStrategy):
                     'tag': tag,
                     'expiry_dt': opt.get('expiry_dt', 'N/A')  # Add expiry date
                 })
-                self.journal.log_trade(opt['instrument_key'], side, qty, price, tag)
-                self.log(f"Leg {i+1}: {side} {qty} PE {opt['strike']} @ ₹{price:.2f}")
+                self.journal.log_trade(opt['instrument_key'], side, qty, price, tag, expiry=opt.get('expiry_dt'))
             else:
                 self.log(f"CRITICAL ERROR: Leg {i+1} order failed. Strategy may be incomplete!")
         
@@ -694,9 +715,9 @@ class WeeklyIronfly(BaseStrategy):
             self.log(f"  → Buy CE {adj_strike} (Next Week)")
             
             # Sell This Week CE
-            resp_w = order_callback(ce_this_week['instrument_key'], config.ORDER_QUANTITY, 'SELL', 'IF_ADJ_CE_SHORT')
+            resp_w = order_callback(ce_this_week['instrument_key'], config.ORDER_QUANTITY, 'SELL', 'IF_ADJ_CE_SHORT', expiry=ce_this_week.get('expiry_dt'))
             # Buy Next Week CE
-            resp_n = order_callback(ce_next_week['instrument_key'], config.ORDER_QUANTITY, 'BUY', 'IF_ADJ_CE_LONG')
+            resp_n = order_callback(ce_next_week['instrument_key'], config.ORDER_QUANTITY, 'BUY', 'IF_ADJ_CE_LONG', expiry=ce_next_week.get('expiry_dt'))
             
             if resp_w and resp_w.get('status') == 'success':
                 price_w = resp_w.get('avg_price', ce_this_week.get('ltp', 0))
@@ -710,7 +731,7 @@ class WeeklyIronfly(BaseStrategy):
                     'tag': 'IF_ADJ_CE_SHORT',
                     'expiry_dt': ce_this_week.get('expiry_dt', 'N/A')
                 })
-                self.journal.log_trade(ce_this_week['instrument_key'], 'SELL', config.ORDER_QUANTITY, price_w, 'IF_ADJ_CE_SHORT')
+                self.journal.log_trade(ce_this_week['instrument_key'], 'SELL', config.ORDER_QUANTITY, price_w, 'IF_ADJ_CE_SHORT', expiry=ce_this_week.get('expiry_dt'))
             
             if resp_n and resp_n.get('status') == 'success':
                 price_n = resp_n.get('avg_price', ce_next_week.get('ltp', 0))
@@ -724,7 +745,7 @@ class WeeklyIronfly(BaseStrategy):
                     'tag': 'IF_ADJ_CE_LONG',
                     'expiry_dt': ce_next_week.get('expiry_dt', 'N/A')
                 })
-                self.journal.log_trade(ce_next_week['instrument_key'], 'BUY', config.ORDER_QUANTITY, price_n, 'IF_ADJ_CE_LONG')
+                self.journal.log_trade(ce_next_week['instrument_key'], 'BUY', config.ORDER_QUANTITY, price_n, 'IF_ADJ_CE_LONG', expiry=ce_next_week.get('expiry_dt'))
             
             self.is_adjusted = True
             self.log("Call Calendar Adjustment deployed.")
@@ -749,7 +770,7 @@ class WeeklyIronfly(BaseStrategy):
     def exit_all_positions(self, order_callback, reason):
         for pos in self.positions:
             exit_side = 'SELL' if pos['side'] == 'BUY' else 'BUY'
-            order_callback(pos['instrument_key'], pos['qty'], exit_side, f"{reason}_EXIT")
+            order_callback(pos['instrument_key'], pos['qty'], exit_side, f"{reason}_EXIT", expiry=pos.get('expiry_dt'))
         self.positions = []
         self.is_adjusted = False
 

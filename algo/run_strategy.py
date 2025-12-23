@@ -64,19 +64,39 @@ def main():
     curr_weekly = expiries[0]
     next_weekly = expiries[1]
     
+    # NEW: Skip today's expiry if executing freshly on an expiry day
+    today = date.today()
+    expiry_skipped = False
+    if curr_weekly == today:
+        print(f"{Fore.YELLOW}Today is expiry day ({today}). Shifting to future expiries as per requirement.{Style.RESET_ALL}")
+        expiry_skipped = True
+        curr_weekly = expiries[1]
+        if len(expiries) > 2:
+            next_weekly = expiries[2]
+        else:
+            print(f"{Fore.RED}WARNING: Not enough future expiries found after shifting.{Style.RESET_ALL}")
     
     # Identify Monthly only if needed
-    # CalendarPEWeekly always needs it, WeeklyIronfly only needs it for adjustments
     needs_monthly = 'CalendarPEWeekly' in config.ACTIVE_STRATEGIES
     
     monthly_expiry = None
     m_expiries = [] 
     if needs_monthly:
-        # Find the last expiry of the next month
+        # Find the last expiry of the next month relative to our (possibly shifted) curr_weekly
         target_month = curr_weekly.month + 1
         target_year = curr_weekly.year
         if target_month > 12: target_month = 1; target_year += 1
-        m_expiries = [d for d in expiries if d.year == target_year and d.month == target_month]
+        
+        # We look through all expiries, skipping today if it was skipped for weekly
+        search_expiries = expiries[1:] if expiries[0] == today else expiries
+        
+        m_expiries = [d for d in search_expiries if d.year == target_year and d.month == target_month]
+        if not m_expiries:
+            # Fallback: next month after target_month
+            target_month += 1
+            if target_month > 12: target_month = 1; target_year += 1
+            m_expiries = [d for d in search_expiries if d.year == target_year and d.month == target_month]
+            
         monthly_expiry = m_expiries[-1] if m_expiries else expiries[-1]
 
     print(f"{Fore.CYAN}Expiries Identified:{Style.RESET_ALL}")
@@ -103,10 +123,20 @@ def main():
     is_day_before_monthly_expiry = (tomorrow == m_expiries[-1]) if needs_monthly and m_expiries else False
     
     # 4. Main Polling Loop
+    last_adj_minute = -1
     try:
         while True:
             now = datetime.now()
             
+            # Candle-Based Adjustment Logic (5-min intervals)
+            adj_interval = 5
+            can_adjust = False
+            if now.minute % adj_interval == 0 and now.minute != last_adj_minute:
+                can_adjust = True
+                # We update last_adj_minute below ONLY IF we actually processed the strategies
+                # But for now, let's mark it so we don't trigger multiple times in the same minute
+                last_adj_minute = now.minute
+
             # A. Get Spot Price
             spot_price = api.get_spot_price(config.SPOT_INSTRUMENT_KEY)
             if not spot_price:
@@ -114,7 +144,8 @@ def main():
                 time.sleep(5)
                 continue
             
-            print(f"[{now.strftime('%H:%M:%S')}] Spot: {spot_price}")
+            adj_status = f"{Fore.GREEN}ADJ WINDOW OPEN{Style.RESET_ALL}" if can_adjust else f"Next Adj: {adj_interval - (now.minute % adj_interval)}m"
+            print(f"[{now.strftime('%H:%M:%S')}] Spot: {spot_price} | {adj_status}")
             
             # B. Build Market Data Context
             # Filter options around ATM (±500 pts)
@@ -135,6 +166,20 @@ def main():
                                 nw_pe_near['instrument_key'].tolist() + nw_ce_near['instrument_key'].tolist() +
                                 m_pe_near['instrument_key'].tolist() + m_ce_near['instrument_key'].tolist()))
             
+            # Ensure currently held positions are ALWAYS included, even if they drift away from ATM
+            for strat in active_strategies:
+                # Handle WeeklyIronfly style (self.positions list)
+                if hasattr(strat, 'positions') and strat.positions:
+                   for pos in strat.positions:
+                       all_keys.append(pos['instrument_key'])
+                # Handle CalendarPEWeekly style (self.weekly_position/monthly_position dicts)
+                if hasattr(strat, 'weekly_position') and strat.weekly_position:
+                    all_keys.append(strat.weekly_position['instrument_key'])
+                if hasattr(strat, 'monthly_position') and strat.monthly_position:
+                    all_keys.append(strat.monthly_position['instrument_key'])
+            
+            all_keys = list(set(all_keys))
+
             if len(all_keys) > 100:
                 print(f"{Fore.YELLOW}WARNING: Requesting high number of symbols ({len(all_keys)}). Possible rate limit risk.{Style.RESET_ALL}")
             
@@ -166,14 +211,14 @@ def main():
             m_chain_data = package_chain(m_pe_near, m_ce_near, quotes, spot_price, now) if needs_monthly else []
 
             # Create Execution Callback
-            def place_trade_callback(instrument_key, qty, side, tag):
+            def place_trade_callback(instrument_key, qty, side, tag, expiry='N/A'):
                 side_colored = f"{Fore.GREEN}{side}{Style.RESET_ALL}" if side == 'BUY' else f"{Fore.RED}{side}{Style.RESET_ALL}"
                 if config.TRADING_MODE == 'PAPER':
                     price = quotes[instrument_key].last_price if instrument_key in quotes else 0.0
-                    print(f"[{datetime.now()}] [{Fore.CYAN}PAPER{Style.RESET_ALL}] {side_colored} {qty} | Key: {instrument_key} | Price: {price}")
+                    print(f"[{datetime.now()}] [{Fore.CYAN}PAPER{Style.RESET_ALL}] {side_colored} {qty} | Key: {instrument_key} | Price: {price} | Expiry: {expiry}")
                     return {'status': 'success', 'avg_price': price}
                 else:
-                    print(f"[{datetime.now()}] [{Fore.RED}LIVE{Style.RESET_ALL}] {side_colored} {qty} | Key: {instrument_key}")
+                    print(f"[{datetime.now()}] [{Fore.RED}LIVE{Style.RESET_ALL}] {side_colored} {qty} | Key: {instrument_key} | Expiry: {expiry}")
                     return api.place_order(instrument_key, qty, side, tag=tag)
 
             # Check Global Entry Windows for LIVE
@@ -195,7 +240,9 @@ def main():
                 'quotes': quotes,
                 'is_day_before_monthly_expiry': is_day_before_monthly_expiry,
                 'is_expiry_today': is_expiry_today,
-                'can_enter_new_cycle': can_enter_new_cycle
+                'can_enter_new_cycle': can_enter_new_cycle,
+                'can_adjust': can_adjust,
+                'expiry_skipped': expiry_skipped
             }
 
             # C. Update All Strategies
