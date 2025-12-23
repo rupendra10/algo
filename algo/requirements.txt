@@ -1,0 +1,10 @@
+scipy
+pandas
+requests
+upstox-cliepandas
+numpy
+scipy
+requests
+python-dotenv
+upstox-client
+colorama
