@@ -5,10 +5,25 @@ This document provides a consolidated overview of how to configure, run, and rem
 ---
 
 ## 🚀 1. Initial Setup
-1.  **Dependencies:** Ensure you have the requirements installed:
-    ```bash
-    pip install upstox-client colorama python-dotenv pandas numpy scipy requests
-    ```
+
+### 🪟 Windows Setup
+1. **Dependencies:**
+   ```bash
+   pip install upstox-client colorama python-dotenv pandas numpy scipy requests
+   ```
+
+### 🐧 Ubuntu/Linux Setup
+Modern Ubuntu (23.04+) requires a virtual environment to prevent system package conflicts.
+1. **Install venv:** `sudo apt update && sudo apt install python3-venv`
+2. **Create Env:** `python3 -m venv venv`
+3. **Activate:** `source venv/bin/activate`
+4. **Install Dependencies:**
+   ```bash
+   pip install upstox-client colorama python-dotenv pandas numpy scipy requests
+   ```
+   *(Note: You must activate the environment every time you open a new terminal.)*
+
+### ⚙️ Configuration
 2.  **Environment Variables (`.env`):** Create a `.env` file in the root directory:
     ```env
     UPSTOX_API_KEY=your_api_key

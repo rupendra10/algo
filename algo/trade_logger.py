@@ -67,13 +67,34 @@ class TradeJournal:
         if strategy_state.get('weekly'):
             w = strategy_state['weekly']
             inst_type = 'Call' if w.get('type') == 'c' else 'Put'
-            expiry_str = w.get('expiry_dt', 'N/A')
-            print(f"OPEN Weekly:   {Fore.YELLOW}{w['strike']} {inst_type}{Style.RESET_ALL} @ {w['entry_price']} (Expiry: {expiry_str} | Current: {strategy_state.get('weekly_ltp', 'N/A')})")
+            # Robust expiry display
+            expiry_val = w.get('expiry_dt') or w.get('expiry', 'N/A')
+            if isinstance(expiry_val, float):
+                expiry_str = f"T~{expiry_val:.4f}y"
+            else:
+                expiry_str = str(expiry_val)
+                
+            strike = w.get('strike', 'N/A')
+            entry = w.get('entry_price', 'N/A')
+            ltp_raw = strategy_state.get('weekly_ltp')
+            ltp = f"{ltp_raw:,.2f}" if ltp_raw is not None else "N/A"
+            print(f"OPEN Weekly:   {Fore.YELLOW}{strike} {inst_type}{Style.RESET_ALL} @ {entry} (Expiry: {expiry_str} | Current: {ltp})")
+            
         if strategy_state.get('monthly'):
             m = strategy_state['monthly']
             inst_type = 'Call' if m.get('type') == 'c' else 'Put'
-            expiry_str = m.get('expiry_dt', 'N/A')
-            print(f"OPEN Monthly:  {Fore.YELLOW}{m['strike']} {inst_type}{Style.RESET_ALL} @ {m['entry_price']} (Expiry: {expiry_str} | Current: {strategy_state.get('monthly_ltp', 'N/A')})")
+            # Robust expiry display
+            expiry_val = m.get('expiry_dt') or m.get('expiry', 'N/A')
+            if isinstance(expiry_val, float):
+                expiry_str = f"T~{expiry_val:.4f}y"
+            else:
+                expiry_str = str(expiry_val)
+                
+            strike = m.get('strike', 'N/A')
+            entry = m.get('entry_price', 'N/A')
+            ltp_raw = strategy_state.get('monthly_ltp')
+            ltp = f"{ltp_raw:,.2f}" if ltp_raw is not None else "N/A"
+            print(f"OPEN Monthly:  {Fore.YELLOW}{strike} {inst_type}{Style.RESET_ALL} @ {entry} (Expiry: {expiry_str} | Current: {ltp})")
         
         # Generic Position Support
         if strategy_state.get('positions'):
@@ -86,13 +107,14 @@ class TradeJournal:
                 side_col = Fore.GREEN if p['side'] == 'BUY' else Fore.RED
                 qty = p['qty']
                 entry = p['entry_price']
-                ltp = p.get('ltp', 0.0)
+                ltp_raw = p.get('ltp')
+                ltp = f"{ltp_raw:,.2f}" if isinstance(ltp_raw, (int, float)) else "N/A"
                 
                 # Calculate "Points" (Normalized to standard lot for easy strategy review)
                 # If QTY=150 and Lot=75, multiplier is 2. Multiplier * Price = Points.
                 multiplier = qty / config.ORDER_QUANTITY
                 net_points_entry = entry * multiplier
-                net_points_ltp = ltp * multiplier if isinstance(ltp, (int, float)) else 0.0
+                net_points_ltp = ltp_raw * multiplier if isinstance(ltp_raw, (int, float)) else 0.0
                 
                 print(f"{side_col}{p['side']} {qty} {p.get('type','')} {p.get('strike','')} @ {entry}{Style.RESET_ALL} "
                       f"(LTP: {ltp} | Net Points: {net_points_ltp:.2f})")

@@ -44,12 +44,6 @@ class CalendarPEWeekly(BaseStrategy):
         market_data: {spot_price, weekly_chain, monthly_chain, quotes, now, master_flags...}
         """
         spot_price = market_data.get('spot_price')
-        weekly_chain = market_data.get('weekly_chain', [])
-        monthly_chain = market_data.get('monthly_chain', [])
-        quotes = market_data.get('quotes', {})
-        now = market_data.get('now', datetime.now())
-
-        spot_price = market_data.get('spot_price')
         # Mapping generic runner keys to strategy-specific usage
         weekly_chain = market_data.get('cw_chain', [])  # Current Weekly
         monthly_chain = market_data.get('m_chain', [])  # Monthly Target
@@ -58,6 +52,31 @@ class CalendarPEWeekly(BaseStrategy):
 
         if not spot_price:
             return
+
+        # 0. Recovery: If positions exist but expiry_dt is missing (old state), try to find it in chains
+        if self.weekly_position and not self.weekly_position.get('expiry_dt'):
+            match = next((x for x in weekly_chain if x['instrument_key'] == self.weekly_position['instrument_key']), None)
+            if match:
+                self.weekly_position['expiry_dt'] = match['expiry_dt']
+        if self.monthly_position and not self.monthly_position.get('expiry_dt'):
+            match = next((x for x in monthly_chain if x['instrument_key'] == self.monthly_position['instrument_key']), None)
+            if match:
+                self.monthly_position['expiry_dt'] = match['expiry_dt']
+
+        # 0.1 Auto-Cleanup for Expired Positions
+        today_str = now.strftime("%Y-%m-%d")
+        if self.weekly_position and self.weekly_position.get('expiry_dt'):
+            if self.weekly_position['expiry_dt'] < today_str:
+                self.log(f"{Fore.RED}AUTO-CLEANUP: Weekly leg {self.weekly_position['strike']} Put expired on {self.weekly_position['expiry_dt']}. Clearing state.{Style.RESET_ALL}")
+                self.weekly_position = None
+                self.save_state()
+        if self.monthly_position and self.monthly_position.get('expiry_dt'):
+            if self.monthly_position['expiry_dt'] < today_str:
+                self.log(f"{Fore.RED}AUTO-CLEANUP: Monthly leg {self.monthly_position['strike']} Put expired on {self.monthly_position['expiry_dt']}. Clearing state.{Style.RESET_ALL}")
+                self.monthly_position = None
+                self.save_state()
+
+        has_acted = False
 
         # 1. Update Deltas for existing positions
         self.update_deltas(spot_price, 
@@ -77,20 +96,22 @@ class CalendarPEWeekly(BaseStrategy):
                     order_callback(self.weekly_position['instrument_key'], config.ORDER_QUANTITY, 'BUY', 'MONDAY_CLOSE')
                     self.weekly_position = None
                     self.last_rollover_date = today_str  # Mark rollover as done for today
+                    has_acted = True
                     self.save_state()
 
         # --- MONTHLY EXPIRY PROTECTION ---
-        if market_data.get('is_day_before_monthly_expiry'):
+        if not has_acted and market_data.get('is_day_before_monthly_expiry'):
             current_time_str = now.strftime("%H:%M")
             if current_time_str >= "15:00" and config.AUTO_EXIT_BEFORE_MONTHLY_EXPIRY_3PM:
                 if self.weekly_position or self.monthly_position:
                     self.exit_all_positions(order_callback, reason="PRE_MONTHLY_EXPIRY_T1")
+                    has_acted = True
                     self.save_state()
                     self.log("Strategy Stopped for the month (T-1).")
                     return
 
         # 2. Check Entry Logic
-        if not self.weekly_position and not self.monthly_position:
+        if not has_acted and not self.weekly_position and not self.monthly_position:
             can_enter = market_data.get('can_enter_new_cycle', True)
             
             # In LIVE mode with strict entry, check if today is monthly expiry
@@ -114,6 +135,7 @@ class CalendarPEWeekly(BaseStrategy):
             
             if can_enter:
                 self.enter_strategy(spot_price, weekly_chain, monthly_chain, order_callback=order_callback)
+                has_acted = True
                 self.save_state()
             else:
                 if now.second < 10 and now.minute % 5 == 0: # Log every 5 mins in the first 10s
@@ -127,32 +149,38 @@ class CalendarPEWeekly(BaseStrategy):
                     else:
                         self.log("WAITING: Cycle entry conditions not yet met.")
         
-        elif not self.weekly_position:
+        elif not has_acted and not self.weekly_position:
             # Re-entry after rollover or leg specific exit
             self.log("Re-entering Weekly Leg")
             self.adjust_weekly_leg(spot_price, weekly_chain, order_callback)
+            has_acted = True
             self.save_state()
 
         # 3. Check Portfolio Risk
-        w_ltp = 0.0
-        m_ltp = 0.0
+        w_ltp = None
+        m_ltp = None
         if self.weekly_position:
             obj = quotes.get(self.weekly_position['instrument_key'])
-            w_ltp = getattr(obj, 'last_price', 0.0) if obj else 0.0
+            w_ltp = getattr(obj, 'last_price', None) if obj else None
         if self.monthly_position:
             obj = quotes.get(self.monthly_position['instrument_key'])
-            m_ltp = getattr(obj, 'last_price', 0.0) if obj else 0.0
+            m_ltp = getattr(obj, 'last_price', None) if obj else None
 
-        if self.check_portfolio_risk(w_ltp, m_ltp, order_callback):
+        if not has_acted and self.check_portfolio_risk(w_ltp, m_ltp, order_callback):
+            has_acted = True
             self.save_state()
             return
 
         # 4. Check Adjustments (ONLY on candle marks)
         can_adjust = market_data.get('can_adjust', True)
         adjustment_made = False
-        if can_adjust:
+        
+        # Prevent double adjustment if we just entered or rolled over in this cycle
+        if not has_acted and can_adjust and self.weekly_position and self.monthly_position:
             adjustment_made = self.check_adjustments(spot_price, weekly_chain, monthly_chain, order_callback=order_callback)
+            
         if adjustment_made:
+            has_acted = True
             self.save_state()
 
         # 5. PnL Summary Logging
@@ -421,13 +449,17 @@ class CalendarPEWeekly(BaseStrategy):
         if not self.weekly_position or not self.monthly_position:
             return False
 
+        # If LTP is missing, we can't accurately check risk, so we skip
+        if weekly_ltp is None or monthly_ltp is None:
+            return False
+
         # PNL = (Entry - Current) for Sell side
         weekly_pnl = (self.weekly_position['entry_price'] - weekly_ltp) * config.ORDER_QUANTITY
         # PNL = (Current - Entry) for Buy side
         monthly_pnl = (monthly_ltp - self.monthly_position['entry_price']) * config.ORDER_QUANTITY
         
         total_pnl = weekly_pnl + monthly_pnl
-        
+
         if total_pnl <= -abs(config.MAX_LOSS_VALUE):
             self.log(f"{Fore.RED}CRITICAL: Max Loss Hit ({total_pnl:.2f}).{Style.RESET_ALL}")
             self.exit_all_positions(order_callback, reason="MAX_LOSS")
@@ -463,9 +495,9 @@ class CalendarPEWeekly(BaseStrategy):
         """Calculates current unrealized P&L."""
         w_pnl = 0.0
         m_pnl = 0.0
-        if self.weekly_position:
+        if self.weekly_position and weekly_ltp is not None:
             w_pnl = (self.weekly_position['entry_price'] - weekly_ltp) * config.ORDER_QUANTITY
-        if self.monthly_position:
+        if self.monthly_position and monthly_ltp is not None:
             m_pnl = (monthly_ltp - self.monthly_position['entry_price']) * config.ORDER_QUANTITY
         return w_pnl + m_pnl
 
@@ -486,12 +518,15 @@ class CalendarPEWeekly(BaseStrategy):
             self.weekly_position = state.get('weekly')
             self.monthly_position = state.get('monthly')
             self.last_rollover_date = state.get('last_rollover_date')  # Load rollover tracking
+            
             if self.weekly_position or self.monthly_position:
                 log_msg = f"{Fore.CYAN}RECOVERY: Loaded existing positions:{Style.RESET_ALL}"
                 if self.weekly_position:
-                    log_msg += f"\n  - Weekly: {self.weekly_position['strike']} Put (Expiry: {self.weekly_position.get('expiry_dt','N/A')})"
+                    exp = self.weekly_position.get('expiry_dt','N/A')
+                    log_msg += f"\n  - Weekly: {self.weekly_position['strike']} Put (Expiry: {exp})"
                 if self.monthly_position:
-                    log_msg += f"\n  - Monthly: {self.monthly_position['strike']} Put (Expiry: {self.monthly_position.get('expiry_dt','N/A')})"
+                    exp = self.monthly_position.get('expiry_dt','N/A')
+                    log_msg += f"\n  - Monthly: {self.monthly_position['strike']} Put (Expiry: {exp})"
                 self.log(log_msg)
                 return True
         return False
@@ -522,6 +557,33 @@ class WeeklyIronfly(BaseStrategy):
 
         if not spot_price: return
 
+        # Recovery: Ensure all positions have expiry_dt
+        if self.positions:
+            for pos in self.positions:
+                if not pos.get('expiry_dt') or pos.get('expiry_dt') == 'N/A':
+                    # Try to find in any of the chains
+                    for chain in [cw_chain, nw_chain, m_chain]:
+                        match = next((x for x in chain if x['instrument_key'] == pos['instrument_key']), None)
+                        if match:
+                            pos['expiry_dt'] = match['expiry_dt']
+                            break
+
+        # Auto-Cleanup for Expired Positions
+        if self.positions:
+            today_str = now.strftime("%Y-%m-%d")
+            valid_positions = []
+            for pos in self.positions:
+                if pos.get('expiry_dt') and pos['expiry_dt'] < today_str:
+                    self.log(f"{Fore.RED}AUTO-CLEANUP: Ironfly leg {pos.get('strike')} {pos.get('type')} expired on {pos['expiry_dt']}. Clearing.{Style.RESET_ALL}")
+                else:
+                    valid_positions.append(pos)
+            
+            if len(valid_positions) < len(self.positions):
+                self.positions = valid_positions
+                self.save_state()
+
+        has_acted = False
+
         # 1. Check Exit Timing (Only if we have positions and today is THAT position's expiry)
         if self.positions:
             is_pos_expiry_today = False
@@ -539,6 +601,7 @@ class WeeklyIronfly(BaseStrategy):
             if is_pos_expiry_today and now.strftime("%H:%M") >= config.IRONFLY_EXIT_TIME:
                 self.log("EXPIRY EXIT: Target week expiry reached. Squaring off all.")
                 self.exit_all_positions(order_callback, reason="EXPIRY_TIME_EXIT")
+                has_acted = True
                 self.save_state()
                 return
 
@@ -569,10 +632,11 @@ class WeeklyIronfly(BaseStrategy):
             
             # If we skipped today's expiry, the main weekly (cw_chain) is already the next contract.
             # We allow entry immediately as today IS technically an expiry day (just the skipped one).
-            if is_paper or (is_entry_day and is_entry_time) or expiry_skipped:
+            if not has_acted and (is_paper or (is_entry_day and is_entry_time) or expiry_skipped):
                 target_chain = cw_chain if expiry_skipped else nw_chain
                 self.log(f"Ironfly Entry Triggered | Expiry Skipped: {expiry_skipped} | Targeting: {target_chain[0]['expiry_dt'] if target_chain else 'N/A'}")
                 self.enter_strategy(spot_price, target_chain, order_callback)
+                has_acted = True
                 self.save_state()
             else:
                 if now.second < 10 and now.minute % 5 == 0: # Log every 5 mins in the first 10s
@@ -582,7 +646,7 @@ class WeeklyIronfly(BaseStrategy):
                         self.log(f"WAITING: Entry window opens at {config.IRONFLY_ENTRY_TIME}")
 
         # 3. Monitor PNL and Adjustments
-        if self.positions:
+        if not has_acted and self.positions:
             total_pnl = self.calculate_total_pnl(quotes)
             pnl_pct = total_pnl / config.IRONFLY_CAPITAL
             
@@ -592,7 +656,7 @@ class WeeklyIronfly(BaseStrategy):
             }
             for pos in self.positions:
                 q = quotes.get(pos['instrument_key'])
-                ltp = getattr(q, 'last_price', 'N/A') if q else 'N/A'
+                ltp = getattr(q, 'last_price', None) if q else None
                 strategy_state['positions'].append({**pos, 'ltp': ltp})
             
             self.journal.print_summary(total_pnl, strategy_state)
@@ -601,6 +665,7 @@ class WeeklyIronfly(BaseStrategy):
             if pnl_pct >= config.IRONFLY_TARGET_PERCENT:
                 self.log(f"TARGET HIT: {pnl_pct*100:.2f}% profit. Exiting.")
                 self.exit_all_positions(order_callback, reason="TARGET_HIT")
+                has_acted = True
                 self.save_state()
             
             # SL / Adjustment Trigger
@@ -608,14 +673,15 @@ class WeeklyIronfly(BaseStrategy):
                 if not self.is_adjusted:
                     if market_data.get('can_adjust', True):
                         self.log(f"ADJUSTMENT TRIGGER: {pnl_pct*100:.2f}% loss. Building Call Calendar.")
-                    # Build Calendar: Sell CE at butterfly expiry (nw_chain), Buy CE at next expiry (cw_chain of following week)
-                    # Note: We need to fetch the week AFTER nw_chain for the long Call
-                    # For now, we'll use cw_chain as the next week relative to nw_chain
-                    self.apply_adjustment(spot_price, nw_chain, cw_chain, order_callback)
-                    self.save_state()
+                        self.apply_adjustment(spot_price, nw_chain, cw_chain, order_callback)
+                        has_acted = True
+                        self.save_state()
+                    else:
+                        self.log(f"ADJUSTMENT PENDING: {pnl_pct*100:.2f}% loss. Waiting for next candle.")
                 else:
                     self.log(f"STOP LOSS HIT: {pnl_pct*100:.2f}% loss (post-adjustment). Exiting.")
                     self.exit_all_positions(order_callback, reason="POST_ADJ_SL_HIT")
+                    has_acted = True
                     self.save_state()
 
     def enter_strategy(self, spot, weekly_chain, order_callback):
@@ -760,7 +826,12 @@ class WeeklyIronfly(BaseStrategy):
         pnl = 0
         for pos in self.positions:
             q = quotes.get(pos['instrument_key'])
-            ltp = getattr(q, 'last_price', pos['entry_price']) if q else pos['entry_price']
+            ltp = getattr(q, 'last_price', None) if q else None
+            
+            # If LTP is missing, we use entry price (assume 0 PnL for that leg) to avoid crashing or misleading spikes
+            if ltp is None:
+                continue
+                
             if pos['side'] == 'BUY':
                 pnl += (ltp - pos['entry_price']) * pos['qty']
             else:

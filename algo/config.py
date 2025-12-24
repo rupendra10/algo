@@ -13,7 +13,7 @@ load_dotenv()
 # 'LIVE': Executes REAL orders on Upstox.
 # 'BACKTEST': Replays historical data from CSV files.
 TRADING_MODE = 'PAPER' 
-ACTIVE_STRATEGIES = [  'WeeklyIronfly'] #CalendarPEWeekly, WeeklyIronfly
+ACTIVE_STRATEGIES = [  'CalendarPEWeekly'] #CalendarPEWeekly, WeeklyIronfly
 
 # ==========================================
 # BACKTEST CONFIGURATION

@@ -168,17 +168,50 @@ def main():
             
             # Ensure currently held positions are ALWAYS included, even if they drift away from ATM
             for strat in active_strategies:
-                # Handle WeeklyIronfly style (self.positions list)
-                if hasattr(strat, 'positions') and strat.positions:
-                   for pos in strat.positions:
-                       all_keys.append(pos['instrument_key'])
-                # Handle CalendarPEWeekly style (self.weekly_position/monthly_position dicts)
+                # CalendarPEWeekly style
                 if hasattr(strat, 'weekly_position') and strat.weekly_position:
                     all_keys.append(strat.weekly_position['instrument_key'])
                 if hasattr(strat, 'monthly_position') and strat.monthly_position:
                     all_keys.append(strat.monthly_position['instrument_key'])
+
+                # WeeklyIronfly style
+                if hasattr(strat, 'positions') and strat.positions:
+                   for pos in strat.positions:
+                       all_keys.append(pos['instrument_key'])
             
             all_keys = list(set(all_keys))
+
+            # NEW: Perform metadata recovery for held positions using Master DF
+            for strat in active_strategies:
+                # CalendarPEWeekly style
+                for pos_attr in ['weekly_position', 'monthly_position']:
+                    pos = getattr(strat, pos_attr, None)
+                    # We check if expiry_dt is missing OR is a float (the old 'expiry' field format)
+                    if pos and (not pos.get('expiry_dt') or pos.get('expiry_dt') == 'N/A' or isinstance(pos.get('expiry_dt'), float)):
+                        key = pos['instrument_key']
+                        match = master.df[master.df['instrument_key'] == key]
+                        if not match.empty:
+                            row = match.iloc[0]
+                            pos['expiry_dt'] = str(row['expiry_dt'])
+                            if 'type' not in pos: pos['type'] = row['instrument_type'].lower()
+                            if 'strike' not in pos: pos['strike'] = float(row['strike'])
+                            strat.save_state()
+
+                # WeeklyIronfly style
+                if hasattr(strat, 'positions') and strat.positions:
+                   changed = False
+                   for pos in strat.positions:
+                       if not pos.get('expiry_dt') or pos.get('expiry_dt') == 'N/A':
+                            key = pos['instrument_key']
+                            match = master.df[master.df['instrument_key'] == key]
+                            if not match.empty:
+                                row = match.iloc[0]
+                                pos['expiry_dt'] = str(row['expiry_dt'])
+                                if 'type' not in pos: pos['type'] = row['instrument_type']
+                                if 'strike' not in pos: pos['strike'] = float(row['strike'])
+                                changed = True
+                   if changed:
+                       strat.save_state()
 
             if len(all_keys) > 100:
                 print(f"{Fore.YELLOW}WARNING: Requesting high number of symbols ({len(all_keys)}). Possible rate limit risk.{Style.RESET_ALL}")
@@ -188,27 +221,29 @@ def main():
             # Helper to package chain data
             def package_chain(pe_df, ce_df, q_dict, spot, t_now):
                 chain = []
+                # Use raw dataframes but only process what we have quotes for
                 for df, opt_type in [(pe_df, 'p'), (ce_df, 'c')]:
-                    for _, row in df.iterrows():
+                    # Optimization: only look at keys we actually fetched
+                    df_relevant = df[df['instrument_key'].isin(q_dict.keys())]
+                    for _, row in df_relevant.iterrows():
                         key = row['instrument_key']
-                        if key in q_dict:
-                            ltp = q_dict[key].last_price
-                            tte = (datetime.combine(row['expiry_dt'], datetime.min.time()) - t_now).total_seconds() / (365*24*3600)
-                            if tte <= 0: tte = 0.0001
-                            chain.append({
-                                'strike': row['strike'],
-                                'iv': calculate_implied_volatility(ltp, spot, row['strike'], tte, config.RISK_FREE_RATE if hasattr(config, 'RISK_FREE_RATE') else 0.05, opt_type),
-                                'time_to_expiry': tte,
-                                'expiry_dt': row['expiry_dt'].strftime('%Y-%m-%d'),  # Convert to string for JSON
-                                'instrument_key': key,
-                                'ltp': ltp,
-                                'type': opt_type
-                            })
+                        ltp = q_dict[key].last_price
+                        tte = (datetime.combine(row['expiry_dt'], datetime.min.time()) - t_now).total_seconds() / (365*24*3600)
+                        if tte <= 0: tte = 0.0001
+                        chain.append({
+                            'strike': row['strike'],
+                            'iv': calculate_implied_volatility(ltp, spot, row['strike'], tte, config.RISK_FREE_RATE if hasattr(config, 'RISK_FREE_RATE') else 0.05, opt_type),
+                            'time_to_expiry': tte,
+                            'expiry_dt': row['expiry_dt'].strftime('%Y-%m-%d'),
+                            'instrument_key': key,
+                            'ltp': ltp,
+                            'type': opt_type
+                        })
                 return chain
 
-            cw_chain_data = package_chain(cw_pe_near, cw_ce_near, quotes, spot_price, now)
-            nw_chain_data = package_chain(nw_pe_near, nw_ce_near, quotes, spot_price, now)
-            m_chain_data = package_chain(m_pe_near, m_ce_near, quotes, spot_price, now) if needs_monthly else []
+            cw_chain_data = package_chain(cw_pe, cw_ce, quotes, spot_price, now)
+            nw_chain_data = package_chain(nw_pe, nw_ce, quotes, spot_price, now)
+            m_chain_data = package_chain(m_pe, m_ce, quotes, spot_price, now) if needs_monthly else []
 
             # Create Execution Callback
             def place_trade_callback(instrument_key, qty, side, tag, expiry='N/A'):
